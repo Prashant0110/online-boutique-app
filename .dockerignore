@@ -1,0 +1,11 @@
+.git
+
+
+README.md
+
+*.log
+
+tmp/
+temp/
+
+.gitignore
