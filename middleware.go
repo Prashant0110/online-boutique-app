@@ -79,7 +79,9 @@ func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx = context.WithValue(ctx, ctxKeyLog{}, log)
 	r = r.WithContext(ctx)
+	httpRequestsTotal.WithLabelValues(r.Method, r.URL.Path, "pending").Inc()
 	lh.next.ServeHTTP(rr, r)
+	
 }
 
 func ensureSessionID(next http.Handler) http.HandlerFunc {
