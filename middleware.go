@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	"strconv"
 )
 
 type ctxKeyLog struct{}
@@ -79,8 +80,9 @@ func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx = context.WithValue(ctx, ctxKeyLog{}, log)
 	r = r.WithContext(ctx)
-	httpRequestsTotal.WithLabelValues(r.Method, r.URL.Path, "pending").Inc()
 	lh.next.ServeHTTP(rr, r)
+	httpRequestsTotal.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(rr.status),
+).Inc()
 	
 }
 
