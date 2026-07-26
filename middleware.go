@@ -17,13 +17,12 @@ package main
 import (
 	"context"
 	"net/http"
-	"time"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
-	"strconv"
-	"time"
 )
 
 type ctxKeyLog struct{}
@@ -61,43 +60,60 @@ func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID, _ := uuid.NewRandom()
 	ctx = context.WithValue(ctx, ctxKeyRequestID{}, requestID.String())
 
+	// Start timer (used for logging + histogram)
 	start := time.Now()
+
 	rr := &responseRecorder{w: w}
+
 	log := lh.log.WithFields(logrus.Fields{
 		"http.req.path":   r.URL.Path,
 		"http.req.method": r.Method,
 		"http.req.id":     requestID.String(),
 	})
+
 	if v, ok := r.Context().Value(ctxKeySessionID{}).(string); ok {
 		log = log.WithField("session", v)
 	}
+
 	log.Debug("request started")
+
 	defer func() {
 		log.WithFields(logrus.Fields{
 			"http.resp.took_ms": int64(time.Since(start) / time.Millisecond),
 			"http.resp.status":  rr.status,
-			"http.resp.bytes":   rr.b}).Debugf("request complete")
+			"http.resp.bytes":   rr.b,
+		}).Debug("request complete")
 	}()
 
 	ctx = context.WithValue(ctx, ctxKeyLog{}, log)
 	r = r.WithContext(ctx)
-	start := time.Now()
+
+	// Gauge: requests currently in progress
 	httpRequestsInFlight.Inc()
 	defer httpRequestsInFlight.Dec()
+
+	// Process request
 	lh.next.ServeHTTP(rr, r)
+
+	// Histogram: request duration
 	httpRequestDuration.WithLabelValues(
-    	r.Method,
-   	r.URL.Path,
-    	strconv.Itoa(rr.status),
+		r.Method,
+		r.URL.Path,
+		strconv.Itoa(rr.status),
 	).Observe(time.Since(start).Seconds())
-	httpRequestsTotal.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(rr.status),
-).Inc()
-	
+
+	// Counter: total requests
+	httpRequestsTotal.WithLabelValues(
+		r.Method,
+		r.URL.Path,
+		strconv.Itoa(rr.status),
+	).Inc()
 }
 
 func ensureSessionID(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var sessionID string
+
 		c, err := r.Cookie(cookieSessionID)
 		if err == http.ErrNoCookie {
 			if os.Getenv("ENABLE_SINGLE_SHARED_SESSION") == "true" {
@@ -107,6 +123,7 @@ func ensureSessionID(next http.Handler) http.HandlerFunc {
 				u, _ := uuid.NewRandom()
 				sessionID = u.String()
 			}
+
 			http.SetCookie(w, &http.Cookie{
 				Name:   cookieSessionID,
 				Value:  sessionID,
@@ -117,8 +134,10 @@ func ensureSessionID(next http.Handler) http.HandlerFunc {
 		} else {
 			sessionID = c.Value
 		}
+
 		ctx := context.WithValue(r.Context(), ctxKeySessionID{}, sessionID)
 		r = r.WithContext(ctx)
+
 		next.ServeHTTP(w, r)
 	}
 }
