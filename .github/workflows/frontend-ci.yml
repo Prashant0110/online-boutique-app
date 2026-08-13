@@ -5,49 +5,44 @@ on:
     branches:
       - main
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
     env:
-      IMAGE_NAME: prashantsapkota27/boutique-frontend
+      AWS_REGION: us-west-2
+      ECR_REPOSITORY: boutique-frontend
 
     steps:
       - name: Checkout Application Code
         uses: actions/checkout@v4
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          role-to-assume: arn:aws:iam::333982363119:role/github-actions-ecr
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-${{ github.run_id }}
+          role-duration-seconds: 900
+          allowed-account-ids: "333982363119"
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set Image Tag
-        run: echo "IMAGE_TAG=${GITHUB_SHA::8}" >> $GITHUB_ENV
+        run: echo "IMAGE_TAG=${GITHUB_SHA::8}" >> "$GITHUB_ENV"
 
       - name: Build Docker Image
         run: |
           docker build \
-            -t $IMAGE_NAME:$IMAGE_TAG \
-            -t $IMAGE_NAME:latest .
+            -t ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG .
 
-      - name: Push Docker Images
+      - name: Push Docker Image
         run: |
-          docker push $IMAGE_NAME:$IMAGE_TAG
-          docker push $IMAGE_NAME:latest
-
-      - name: Start SSH Agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.GITOPS_SSH_KEY }}
-
-      - name: Trust GitHub Host Key
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-          chmod 700 ~/.ssh
-          chmod 600 ~/.ssh/known_hosts
-
-      - name: Clone GitOps Repository
-        run: |
-          git clone git@github.com:Prashant0110/google-boutique-gitops.git
+          docker push \
+            ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
