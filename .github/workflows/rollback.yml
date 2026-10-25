@@ -1,0 +1,158 @@
+name: Manual GitOps Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service to roll back
+        type: choice
+        required: true
+        options:
+          - frontend
+          - paymentservice
+      previous_image_tag:
+        description: Full Git commit SHA of a previously published image
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  AWS_ACCOUNT_ID: "333982363119"
+  AWS_ROLE_ARN: arn:aws:iam::333982363119:role/github-actions-ecr
+  GITOPS_REPOSITORY: Prashant0110/google-boutique-gitops
+  GITOPS_BRANCH: feat/apex-assessment
+
+jobs:
+  rollback:
+    name: Verify image and create rollback PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate image tag
+        env:
+          SERVICE: ${{ inputs.service }}
+          IMAGE_TAG: ${{ inputs.previous_image_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$SERVICE" == "frontend" || "$SERVICE" == "paymentservice" ]]
+          [[ "$IMAGE_TAG" =~ ^[0-9a-fA-F]{7,40}$ ]] || {
+            echo "Use a previously published Git SHA image tag."
+            exit 1
+          }
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Verify image exists in ECR
+        env:
+          SERVICE: ${{ inputs.service }}
+          IMAGE_TAG: ${{ inputs.previous_image_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$SERVICE" == "frontend" ]]; then
+            REPOSITORY="boutique-frontend"
+          else
+            REPOSITORY="boutique-paymentservice"
+          fi
+
+          aws ecr describe-images \
+            --repository-name "$REPOSITORY" \
+            --image-ids "imageTag=$IMAGE_TAG"
+
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPOSITORY }}
+          ref: ${{ env.GITOPS_BRANCH }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+
+      - name: Update GitOps image tag
+        env:
+          SERVICE: ${{ inputs.service }}
+          IMAGE_TAG: ${{ inputs.previous_image_tag }}
+          AWS_ACCOUNT_ID: ${{ env.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          service = os.environ["SERVICE"]
+          tag = os.environ["IMAGE_TAG"]
+          account = os.environ["AWS_ACCOUNT_ID"]
+          region = os.environ["AWS_REGION"]
+
+          if service == "frontend":
+              path = Path("gitops/helm/apps/frontend/values.yaml")
+              repository = "boutique-frontend"
+          elif service == "paymentservice":
+              path = Path("gitops/helm/apps/paymentservice/values.yaml")
+              repository = "boutique-paymentservice"
+          else:
+              raise SystemExit("Unsupported service")
+
+          registry = f"{account}.dkr.ecr.{region}.amazonaws.com"
+          image_repository = f"{registry}/{repository}"
+
+          lines = path.read_text().splitlines(keepends=True)
+          start = next(
+              (i for i, line in enumerate(lines)
+               if line.strip() == "image:" and not line[:1].isspace()),
+              None,
+          )
+          if start is None:
+              raise SystemExit(f"Top-level image block not found: {path}")
+
+          end = start + 1
+          while end < len(lines):
+              if lines[end].strip() and not lines[end][:1].isspace():
+                  break
+              end += 1
+
+          found_repository = False
+          found_tag = False
+          for i in range(start + 1, end):
+              stripped = lines[i].lstrip()
+              indent = lines[i][:len(lines[i]) - len(stripped)]
+              if stripped.startswith("repository:"):
+                  lines[i] = f"{indent}repository: {image_repository}\n"
+                  found_repository = True
+              elif stripped.startswith("tag:"):
+                  lines[i] = f"{indent}tag: {tag}\n"
+                  found_tag = True
+
+          if not found_repository or not found_tag:
+              raise SystemExit(f"Image repository/tag missing: {path}")
+
+          path.write_text("".join(lines))
+          print(f"Rollback target: {service} -> {image_repository}:{tag}")
+          PY
+
+      - name: Create rollback pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+          base: ${{ env.GITOPS_BRANCH }}
+          branch: rollback/${{ inputs.service }}-${{ inputs.previous_image_tag }}
+          delete-branch: true
+          commit-message: "rollback: restore ${{ inputs.service }} image ${{ inputs.previous_image_tag }}"
+          title: "rollback: restore ${{ inputs.service }} image ${{ inputs.previous_image_tag }}"
+          body: |
+            Manual GitOps rollback request.
+
+            - Service: `${{ inputs.service }}`
+            - Image tag: `${{ inputs.previous_image_tag }}`
+
+            The workflow verifies that the requested image exists in ECR
+            and changes the corresponding Helm values. Review and merge
+            this pull request to let Argo CD reconcile the rollback.
