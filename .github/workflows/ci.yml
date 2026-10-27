@@ -16,8 +16,8 @@ concurrency:
 
 env:
   AWS_REGION: us-west-2
-  AWS_ACCOUNT_ID: "333982363119"
-  AWS_ROLE_ARN: arn:aws:iam::333982363119:role/github-actions-ecr
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
   GITOPS_REPOSITORY: Prashant0110/google-boutique-gitops
   GITOPS_BRANCH: feat/apex-assessment
 
